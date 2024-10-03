@@ -5,8 +5,10 @@ import os
 import PyPDF2
 import docx2txt
 from datetime import datetime
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
