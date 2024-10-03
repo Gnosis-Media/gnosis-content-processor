@@ -1,14 +1,20 @@
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from werkzeug.utils import secure_filename
+from werkzeug.utils import secure_filename  
+from flask_cors import CORS
 import os
 import PyPDF2
 import docx2txt
 from datetime import datetime
 from flask_cors import CORS
 
+#CORS
 app = Flask(__name__)
 CORS(app)
+<<<<<<< HEAD
+=======
+C_PORT = 5001
+>>>>>>> 21ab5f483dba4992f14a69e94f0d7259d34f7c9c
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -166,4 +172,4 @@ if __name__ == '__main__':
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     with app.app_context():
         db.create_all()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=C_PORT)
