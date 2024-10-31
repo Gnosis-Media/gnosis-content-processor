@@ -1,3 +1,4 @@
+import uuid
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename  
@@ -6,18 +7,23 @@ import os
 import PyPDF2
 import docx2txt
 from datetime import datetime
-from flask_cors import CORS
 import requests
 import logging
+from threading import Thread
+from collections import defaultdict
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', filename='app.log')
 
-#CORS
+# CORS
 app = Flask(__name__)
 CORS(app)
-<<<<<<< HEAD
-=======
-C_PORT = 5001
->>>>>>> 21ab5f483dba4992f14a69e94f0d7259d34f7c9c
+
+# Track upload status and results
+upload_status = {}
+upload_results = {}
+
+C_PORT = 5002
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -25,11 +31,10 @@ ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://admin:Wfe._84ivN3UX4j.X2z!dfKnAiRA@content-database-1.c1qcm4w2sbne.us-east-1.rds.amazonaws.com:3306/content_db'
-# app.config['SQLALCHEMY_BINDS'] = {
-#     'conversation_db': 'mysql+pymysql://admin:Wfe._84ivN3UX4j.X2z!dfKnAiRA@content-database-1.c1qcm4w2sbne.us-east-1.rds.amazonaws.com:3306/conversation_db'
-# }
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://admin:VYglUg5GphMwRuOIv6Lz@content-db.c1ytbjumgtbu.us-east-1.rds.amazonaws.com:3306/content_db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+CONVERSATION_API_URL = 'http://localhost:5000'
 
 db = SQLAlchemy(app)
 
@@ -74,174 +79,218 @@ def extract_text(file_path):
     else:
         return "Unsupported file type"
 
+# Add at the top with other imports
+from threading import Thread
+from collections import defaultdict
+
+# Add after app initialization
+# Track upload status and results
+upload_status = {}
+upload_results = {}
+
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
+        logging.warning("No file part in the request")
         return jsonify({'error': 'No file part in the request'}), 400
 
     file = request.files['file']
-    user_id = request.form.get('user_id')  # Obtain user_id from request form data
+    user_id = request.form.get('user_id')
 
     if not user_id:
+        logging.warning("user_id is required")
         return jsonify({'error': 'user_id is required'}), 400
 
     try:
         user_id = int(user_id)
     except ValueError:
+        logging.warning("user_id must be an integer")
         return jsonify({'error': 'user_id must be an integer'}), 400
 
     if file.filename == '':
+        logging.warning("No selected file")
         return jsonify({'error': 'No selected file'}), 400
 
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        file.save(file_path)
-
-        extracted_text = extract_text(file_path)
-
-        # Save content info to the content DB
-        try:
-            new_content = Content(
-                user_id=user_id,
-                file_name=filename,
-                file_type=file.content_type,
-                file_size=os.path.getsize(file_path),
-                s3_key=file_path  # In a real scenario, this would be the S3 key
-            )
-            db.session.add(new_content)
-            db.session.commit()
-            logging.info(f"Content saved with ID: {new_content.id}")
-        except Exception as e:
-            logging.exception("Failed to save content to the database")
-            return jsonify({'error': 'Failed to save content'}), 500
-
-        # Save chunks to the content chunk DB
-        chunk_size = 1000  # Adjust as needed
-        chunks = [extracted_text[i:i+chunk_size] for i in range(0, len(extracted_text), chunk_size)]
-
-        for i, chunk_text in enumerate(chunks):
-            try:
-                new_chunk = ContentChunk(
-                    content_id=new_content.id,
-                    chunk_order=i,
-                    chunk_text=chunk_text
-                )
-                db.session.add(new_chunk)
-            except Exception as e:
-                logging.exception("Failed to save content chunk to the database")
-                return jsonify({'error': 'Failed to save content chunk'}), 500
-
-        new_content.chunk_count = len(chunks)
-        db.session.commit()
-        logging.info(f"Total chunks saved: {new_content.chunk_count}")
-
-        # Send POST requests to the conversation API
-        conversation_api_url = 'http://loReplace with your Conversation API URL' 
-
-        for i, chunk_text in enumerate(chunks):
-            try:
-                # Create a new conversation
-                conversation_data = {
-                    'user_id': user_id
-                }
-                conversation_response = requests.post(f'{conversation_api_url}/conversations', json=conversation_data)
-
-                if conversation_response.status_code == 201:
-                    conversation = conversation_response.json()
-                    conversation_id = conversation['id']
-                    logging.info(f"Conversation created with ID: {conversation_id}")
-
-                    # Create a new message
-                    message_data = {
-                        'conversation_id': conversation_id,
-                        'sender': 'user',
-                        'content_chunk_id': new_content.id,  # Assuming you want to associate the message with the content ID
-                        'message_text': chunk_text[:200]  # First 200 characters
-                    }
-                    message_response = requests.post(f'{conversation_api_url}/messages', json=message_data)
-
-                    if message_response.status_code == 201:
-                        logging.info(f"Message created in conversation ID: {conversation_id}")
-                    else:
-                        logging.error(f"Failed to create message in conversation ID: {conversation_id}")
-                        logging.error(f"Response: {message_response.text}")
-                else:
-                    logging.error("Failed to create conversation")
-                    logging.error(f"Response: {conversation_response.text}")
-            except Exception as e:
-                logging.exception("An error occurred while creating conversation and message")
-
-        preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
-
-        return jsonify({
-            'message': 'File successfully uploaded and processed',
-            'filename': filename,
-            'preview': preview
-        }), 200
-    else:
+    if not allowed_file(file.filename):
+        logging.warning("File type not allowed")
         return jsonify({'error': 'File type not allowed'}), 400
-    
-@app.route('/api/process_chunk', methods=['POST'])
-def process_chunk():
-    data = request.get_json()
-    chunk_id = data.get('chunk_id')
-    user_id = data.get('user_id')  
 
-    if not chunk_id:
-        return jsonify({'error': 'chunk_id is required'}), 400
+    # Save the file content before starting the thread
+    file_content = file.read()
+    content_type = file.content_type
+    original_filename = file.filename
 
-    if not user_id:
-        return jsonify({'error': 'user_id is required'}), 400
+    # Generate upload ID and initialize status
+    upload_id = str(uuid.uuid4())
+    upload_status[upload_id] = "PROCESSING"
+    logging.info(f"Upload started for ID: {upload_id}")
 
-    try:
-        chunk = ContentChunk.query.get(chunk_id)
-        if not chunk:
-            return jsonify({'error': 'Content chunk not found'}), 404
+    def process_upload():
+        try:
+            with app.app_context():
+                filename = secure_filename(original_filename)
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+                
+                # Write the saved content to file
+                with open(file_path, 'wb') as f:
+                    f.write(file_content)
 
-        # Generate required fields for conversation creation
-        conversation_api_url = 'http://Replace with your Conversation API URL'  
+                # Extract text from file
+                extracted_text = extract_text(file_path)
+                
+                # Save content to database
+                new_content = Content(
+                    user_id=user_id,
+                    file_name=filename,
+                    file_type=content_type,
+                    file_size=len(file_content),
+                    s3_key=file_path
+                )
+                db.session.add(new_content)
+                db.session.flush()  # Get the content ID
 
-        conversation_data = {
-            'user_id': int(user_id)
-        }
-        conversation_response = requests.post(f'{conversation_api_url}/conversations', json=conversation_data)
+                # Process chunks
+                chunk_size = 1500
+                chunks = [extracted_text[i:i+chunk_size] for i in range(0, len(extracted_text), chunk_size)]
+                
+                # Save chunks and create conversations
+                for i, chunk_text in enumerate(chunks):
+                    try:
+                        # Save chunk
+                        new_chunk = ContentChunk(
+                            content_id=new_content.id,
+                            chunk_order=i,
+                            chunk_text=chunk_text
+                        )
+                        db.session.add(new_chunk)
+                        
+                        # Create conversation for chunk
+                        conversation_data = {
+                            'user_id': user_id,
+                            'message': chunk_text
+                        }
+                        
+                        conversation_response = requests.post(
+                            f'{CONVERSATION_API_URL}/api/convos',
+                            json=conversation_data
+                        )
 
-        if conversation_response.status_code == 201:
-            conversation = conversation_response.json()
-            conversation_id = conversation['id']
-            logging.info(f"Conversation created with ID: {conversation_id}")
+                        if conversation_response.status_code == 201:
+                            conversation = conversation_response.json()['conversation']
+                            conversation_id = conversation['id']
+                            
+                            # Update content_chunk_id
+                            message_data = {
+                                'message': chunk_text,
+                                'content_chunk_id': new_content.id
+                            }
+                            
+                            requests.put(
+                                f'{CONVERSATION_API_URL}/api/convos/{conversation_id}/reply',
+                                json=message_data
+                            )
+                    except Exception as chunk_error:
+                        logging.error(f"Error processing chunk {i}: {str(chunk_error)}")
+                        continue
 
-            # Create a new message
-            message_data = {
-                'conversation_id': conversation_id,
-                'sender': 'user',
-                'content_chunk_id': chunk.id,
-                'message_text': chunk.chunk_text[:200]  # First 200 characters
+                # Update chunk count and commit
+                new_content.chunk_count = len(chunks)
+                db.session.commit()
+
+                # Clean up the file after processing
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    logging.warning(f"Failed to remove temporary file {file_path}: {str(e)}")
+
+                # Set success status and results
+                preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
+                upload_status[upload_id] = "COMPLETED"
+                upload_results[upload_id] = {
+                    'message': 'File successfully uploaded and processed',
+                    'filename': filename,
+                    'preview': preview,
+                    'content_id': new_content.id,
+                    'chunk_count': len(chunks)
+                }
+                logging.info(f"Upload completed for ID: {upload_id}")
+
+        except Exception as e:
+            logging.exception("Upload processing failed")
+            upload_status[upload_id] = "FAILED"
+            upload_results[upload_id] = {
+                'error': str(e)
             }
-            message_response = requests.post(f'{conversation_api_url}/messages', json=message_data)
+            if 'db' in locals():
+                db.session.rollback()
 
-            if message_response.status_code == 201:
-                logging.info(f"Message created in conversation ID: {conversation_id}")
-                return jsonify({'message': 'Chunk processed successfully'}), 200
-            else:
-                logging.error(f"Failed to create message in conversation ID: {conversation_id}")
-                logging.error(f"Response: {message_response.text}")
-                return jsonify({'error': 'Failed to create message'}), 500
-        else:
-            logging.error("Failed to create conversation")
-            logging.error(f"Response: {conversation_response.text}")
-            return jsonify({'error': 'Failed to create conversation'}), 500
-    except Exception as e:
-        logging.exception("An error occurred while processing chunk")
-        return jsonify({'error': 'An error occurred while processing chunk'}), 500
-    
+    # Start processing in background
+    Thread(target=process_upload).start()
+
+    # Return immediately with upload ID
+    return jsonify({
+        'message': 'Upload accepted for processing',
+        'upload_id': upload_id
+    }), 202
+
+@app.route('/api/upload_status/<upload_id>', methods=['GET'])
+def get_upload_status(upload_id):
+    status = upload_status.get(upload_id)
+    if not status:
+        logging.warning(f"Upload ID not found: {upload_id}")
+        return jsonify({'error': 'Upload ID not found'}), 404
+
+    response = {
+        'status': status
+    }
+
+    if status in ["COMPLETED", "FAILED"]:
+        response['result'] = upload_results.get(upload_id)
+        
+        # Cleanup completed uploads after sending response
+        if status == "COMPLETED":
+            upload_status.pop(upload_id, None)
+            upload_results.pop(upload_id, None)
+
+    return jsonify(response), 200
 
 @app.route('/api/files', methods=['GET'])
 def list_files():
-    files = os.listdir(app.config['UPLOAD_FOLDER'])
-    return jsonify({'files': files})
+    user_id = request.args.get('user_id')
+    
+    if not user_id:
+        logging.warning("user_id is required")
+        return jsonify({'error': 'user_id is required'}), 400
+        
+    try:
+        user_id = int(user_id)
+    except ValueError:
+        logging.warning("user_id must be an integer")
+        return jsonify({'error': 'user_id must be an integer'}), 400
+        
+    try:
+        # Query the content table for files belonging to the user
+        user_files = Content.query.filter_by(user_id=user_id).order_by(Content.upload_date.desc()).all()
+        
+        files_data = [{
+            'id': file.id,
+            'file_name': file.file_name,
+            'file_type': file.file_type,
+            'upload_date': file.upload_date,
+            'file_size': file.file_size,
+            'chunk_count': file.chunk_count,
+            'custom_prompt': file.custom_prompt
+        } for file in user_files]
+        
+        return jsonify({
+            'files': files_data,
+            'count': len(files_data)
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Error fetching files: {e}")
+        return jsonify({'error': 'Failed to fetch files'}), 500
 
 if __name__ == '__main__':
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
