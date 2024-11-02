@@ -15,9 +15,5 @@ setuptools==75.1.0
 SQLAlchemy==2.0.35
 typing_extensions==4.12.2
 Werkzeug==2.3.4
-<<<<<<< HEAD
-docx2txt==0.8
-flask-cors==4.0.0
-=======
 wheel==0.44.0
->>>>>>> 21ab5f483dba4992f14a69e94f0d7259d34f7c9c
+requests==2.31.0
