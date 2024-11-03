@@ -1,4 +1,5 @@
 import uuid
+import random
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename  
@@ -39,7 +40,7 @@ CONVERSATION_API_URL = 'http://localhost:5000'
 EMBEDDING_API_URL = 'http://localhost:5008'
 METADATA_API_URL = 'http://localhost:5010'
 PROFILES_API_URL = 'http://localhost:5011'
-
+INFLUENCER_API_URL = 'http://localhost:5012'
 db = SQLAlchemy(app)
 
 # Define database models
@@ -111,15 +112,6 @@ def add_links(response_data, endpoint, **params):
 
     return response_data
 
-# Add at the top with other imports
-from threading import Thread
-from collections import defaultdict
-
-# Add after app initialization
-# Track upload status and results
-upload_status = {}
-upload_results = {}
-
 def validate_metadata(metadata):
     """Validate metadata fields"""
     required_fields = [
@@ -143,6 +135,77 @@ def validate_metadata(metadata):
         metadata['publication_date'] = None
     
     return metadata
+
+def create_conversation(user_id, content_id, content_chunk_id):
+    """Helper function to create conversation in a separate thread"""
+    try:
+        conversation_data = {
+            'user_id': user_id,
+            'content_id': content_id,
+            'content_chunk_id': content_chunk_id
+        }
+        
+        conversation_response = requests.post(
+            f'{CONVERSATION_API_URL}/api/convos',
+            json=conversation_data
+        )
+
+        if conversation_response.status_code == 201:
+            logging.info(f"Conversation created successfully with ID: {conversation_response.json().get('conversation_id')}")
+        else:
+            logging.error(f"Failed to create conversation: {conversation_response.status_code} {conversation_response.text}")                            
+    except Exception as e:
+        logging.error(f"Error creating conversation: {str(e)}")
+
+def process_chunks(chunks, new_content, user_id, random_chunks_ids):
+    """Process chunks in a separate thread"""
+    try:
+        with app.app_context():
+            for i, chunk_text in enumerate(chunks):
+                try:
+                    # Post embedding get the embedding id
+                    embedding_response = requests.post(
+                        f'{EMBEDDING_API_URL}/api/embedding',
+                        json={'text': chunk_text}
+                    )
+
+                    if embedding_response.status_code == 202:
+                        embedding_id = embedding_response.json().get('id')
+                    else:
+                        logging.error(f"Failed to create embedding: {embedding_response.status_code} {embedding_response.text}")
+                        embedding_id = None
+
+                    # Save chunk
+                    new_chunk = ContentChunk(
+                        content_id=new_content.id,
+                        chunk_order=i,
+                        chunk_text=chunk_text,
+                        embedding_id=embedding_id
+                    )
+                    db.session.add(new_chunk)
+                    db.session.flush()
+                    db.session.commit()
+                    logging.info(f"Chunk created with ID: {new_chunk.id}")
+
+                    if i in random_chunks_ids:
+                        Thread(
+                            target=create_conversation,
+                            args=(user_id, new_content.id, new_chunk.id)
+                        ).start()
+                        logging.info(f"Started conversation creation thread for chunk {new_chunk.id}")
+
+                except Exception as chunk_error:
+                    logging.error(f"Error processing chunk {i}: {str(chunk_error)}")
+                    continue
+
+            # Update chunk count and commit
+            new_content.chunk_count = len(chunks)
+            db.session.commit()
+            logging.info(f"Completed processing all chunks for content ID: {new_content.id}")
+
+    except Exception as e:
+        logging.error(f"Error in chunk processing thread: {str(e)}")
+
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -246,56 +309,18 @@ def upload_file():
                 chunk_size = 1500
                 chunks = [extracted_text[i:i+chunk_size] for i in range(0, len(extracted_text), chunk_size)]
                 
-                # Save chunks and create conversations
-                for i, chunk_text in enumerate(chunks):
-                    try:
-                        # Post embedding get the embedding id
-                        embedding_response = requests.post(
-                            f'{EMBEDDING_API_URL}/api/embedding',
-                            json={'text': chunk_text}
-                        )
+                random_chunks_ids = random.sample(range(len(chunks)), 9)
+                # Make sure that one of the random chunks is early in the index first 10% of the length
+                random_chunks_ids.append(random.randint(0, int(len(chunks) * 0.1)))
+                # remove duplicates
+                random_chunks_ids = list(set(random_chunks_ids))
 
-                        if embedding_response.status_code == 201:
-                            embedding_id = embedding_response.json().get('id')
-                        else:
-                            logging.error(f"Failed to create embedding: {embedding_response.status_code} {embedding_response.text}")
-                            embedding_id = None
-
-                        # Save chunk
-                        new_chunk = ContentChunk(
-                            content_id=new_content.id,
-                            chunk_order=i,
-                            chunk_text=chunk_text,
-                            embedding_id=embedding_id
-                        )
-                        db.session.add(new_chunk)
-                        db.session.flush() # Get the chunk ID
-                        logging.info(f"Chunk created with ID: {new_chunk.id}")
-                        
-                        # Create conversation for chunk
-                        conversation_data = {
-                            'user_id': user_id,
-                            'message_text': chunk_text,
-                            'content_chunk_id': new_chunk.id                            
-                        }
-                        
-                        conversation_response = requests.post(
-                            f'{CONVERSATION_API_URL}/api/convos',
-                            json=conversation_data
-                        )
-
-                        if conversation_response.status_code == 201:
-                            logging.info(f"Conversation created successfully with ID: {conversation_response.json().get('conversation').get('id')}")
-                        else:
-                            logging.error(f"Failed to create conversation: {conversation_response.status_code} {conversation_response.text}")                        
-                    except Exception as chunk_error:
-                        logging.error(f"Error processing chunk {i}: {str(chunk_error)}")
-                        continue
-
-                # Update chunk count and commit
-                new_content.chunk_count = len(chunks)
-                db.session.commit()
-
+                Thread(
+                    target=process_chunks,
+                    args=(chunks, new_content, user_id, random_chunks_ids)
+                ).start()
+                logging.info(f"Started chunk processing thread for content ID: {new_content.id}")            
+                    
                 # Clean up the file after processing
                 try:
                     os.remove(file_path)
@@ -303,7 +328,8 @@ def upload_file():
                     logging.warning(f"Failed to remove temporary file {file_path}: {str(e)}")
 
                 # Set success status and results
-                preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
+                # Set the preview to be profile info and first 100 characters of the content
+                preview = f"{metadata.get('title', '')} by {metadata.get('author', '')} - {chunks[0][:100]}..."
                 upload_status[upload_id] = "COMPLETED"
                 upload_results[upload_id] = {
                     'message': 'File successfully uploaded and processed',
