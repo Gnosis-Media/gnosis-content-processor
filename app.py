@@ -12,6 +12,7 @@ import requests
 import logging
 from threading import Thread
 from collections import defaultdict
+from secrets_manager import get_service_secrets
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -24,7 +25,9 @@ CORS(app)
 upload_status = {}
 upload_results = {}
 
-C_PORT = 5002
+secrets = get_service_secrets('gnosis-content-processor')
+
+C_PORT = int(secrets.get('PORT', 5000))
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -32,15 +35,19 @@ ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://admin:VYglUg5GphMwRuOIv6Lz@content-db.c1ytbjumgtbu.us-east-1.rds.amazonaws.com:3306/content_db'
+SQLALCHEMY_DATABASE_URI = (
+    f"mysql+pymysql://{secrets['MYSQL_USER']}:{secrets['MYSQL_PASSWORD_CONTENT']}"
+    f"@{secrets['MYSQL_HOST']}:{secrets['MYSQL_PORT']}/{secrets['MYSQL_DATABASE']}"
+)
+app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # CHANGE THIS TO CLOUD URL FOR PRODUCTION
-CONVERSATION_API_URL = 'http://localhost:5000'
-EMBEDDING_API_URL = 'http://localhost:5008'
-METADATA_API_URL = 'http://localhost:5010'
-PROFILES_API_URL = 'http://localhost:5011'
-INFLUENCER_API_URL = 'http://localhost:5012'
+CONVERSATION_API_URL = secrets.get('CONVERSATION_API_URL', 'http://localhost:5000')
+EMBEDDING_API_URL = secrets.get('EMBEDDING_API_URL', 'http://localhost:5008')
+METADATA_API_URL = secrets.get('METADATA_API_URL', 'http://localhost:5010')
+PROFILES_API_URL = secrets.get('PROFILES_API_URL', 'http://localhost:5011')
+INFLUENCER_API_URL = secrets.get('INFLUENCER_API_URL', 'http://localhost:5012')
 db = SQLAlchemy(app)
 
 # Define database models
@@ -308,8 +315,9 @@ def upload_file():
                 # Process chunks
                 chunk_size = 1500
                 chunks = [extracted_text[i:i+chunk_size] for i in range(0, len(extracted_text), chunk_size)]
-                
-                random_chunks_ids = random.sample(range(len(chunks)), 9)
+                                
+                num_chunks_to_sample = min(9, len(chunks))  # Ensure we don't sample more than available
+                random_chunks_ids = random.sample(range(len(chunks)), num_chunks_to_sample)
                 # Make sure that one of the random chunks is early in the index first 10% of the length
                 random_chunks_ids.append(random.randint(0, int(len(chunks) * 0.1)))
                 # remove duplicates
@@ -380,6 +388,21 @@ def get_upload_status(upload_id):
             upload_results.pop(upload_id, None)
 
     return jsonify(add_links(response_data, 'upload_status', user_id=upload_results.get(upload_id, {}).get('user_id'))), 200
+
+# get all content_ids for a user
+@app.route('/api/content_ids', methods=['GET'])
+def get_content_ids():
+    user_id = request.args.get('user_id')
+    if not user_id:
+        logging.warning("user_id is required")
+        return jsonify({'error': 'user_id is required'}), 400
+        
+    try:
+        content_ids = [content.id for content in Content.query.filter_by(user_id=user_id).all()]
+        return jsonify(content_ids), 200
+    except Exception as e:
+        logging.error(f"Error getting content IDs: {e}")
+        return jsonify({'error': 'Failed to get content IDs'}), 500
 
 if __name__ == '__main__':
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
