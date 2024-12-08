@@ -13,6 +13,8 @@ import logging
 from threading import Thread
 from collections import defaultdict
 from secrets_manager import get_service_secrets
+import json
+import boto3
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -48,6 +50,16 @@ EMBEDDING_API_URL = secrets.get('EMBEDDING_API_URL', 'http://localhost:5008')
 METADATA_API_URL = secrets.get('METADATA_API_URL', 'http://localhost:5010')
 PROFILES_API_URL = secrets.get('PROFILES_API_URL', 'http://localhost:5011')
 INFLUENCER_API_URL = secrets.get('INFLUENCER_API_URL', 'http://localhost:5012')
+USERS_API_URL = secrets.get('USERS_API_URL', 'http://localhost:5007')
+API_KEY = secrets.get('API_KEY')
+
+lambda_client = boto3.client(
+    'lambda',
+    region_name='us-east-1',  # replace with your AWS region
+    aws_access_key_id=secrets.get('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=secrets.get('AWS_SECRET_ACCESS_KEY')
+)
+
 db = SQLAlchemy(app)
 
 # Define database models
@@ -152,9 +164,11 @@ def create_conversation(user_id, content_id, content_chunk_id):
             'content_chunk_id': content_chunk_id
         }
         
+        headers = {'X-API-KEY': API_KEY}
         conversation_response = requests.post(
             f'{CONVERSATION_API_URL}/api/convos',
-            json=conversation_data
+            json=conversation_data,
+            headers=headers
         )
 
         if conversation_response.status_code == 201:
@@ -171,9 +185,11 @@ def process_chunks(chunks, new_content, user_id, random_chunks_ids):
             for i, chunk_text in enumerate(chunks):
                 try:
                     # Post embedding get the embedding id
+                    headers = {'X-API-KEY': API_KEY}
                     embedding_response = requests.post(
                         f'{EMBEDDING_API_URL}/api/embedding',
-                        json={'text': chunk_text}
+                        json={'text': chunk_text},
+                        headers=headers
                     )
 
                     if embedding_response.status_code == 202:
@@ -244,7 +260,7 @@ def upload_file():
 
     # Save the file content before starting the thread
     file_content = file.read()
-    content_type = file.content_type
+    content_type = file.content_type or 'text/plain'
     original_filename = file.filename
 
     # Generate upload ID and initialize status
@@ -267,9 +283,11 @@ def upload_file():
                 extracted_text = extract_text(file_path)
 
                 # Get metadata
+                headers = {'X-API-KEY': API_KEY}
                 metadata_response = requests.post(
                     f'{METADATA_API_URL}/api/metadata/extract',
-                    json={'text': extracted_text[:3000], 'file_name': filename, 'additional_info': custom_prompt}
+                    json={'text': extracted_text[:3000], 'file_name': filename, 'additional_info': custom_prompt},
+                    headers=headers
                 )
 
                 if metadata_response.status_code == 200:
@@ -304,7 +322,8 @@ def upload_file():
                 # Call the profiles API to create an AI profile for the content
                 profile_response = requests.post(
                     f'{PROFILES_API_URL}/api/ais',
-                    json={'content_id': new_content.id}
+                    json={'content_id': new_content.id},
+                    headers=headers
                 )
 
                 if profile_response.status_code == 201:
@@ -347,6 +366,44 @@ def upload_file():
                     'chunk_count': len(chunks)
                 }
                 logging.info(f"Upload completed for ID: {upload_id}")
+
+                # Construct the URL for the GET request
+                url = f'{USERS_API_URL}/api/users/{user_id}/email'
+
+                # Make the GET request
+                response = requests.get(url, headers=headers)
+
+                # Initialize Default Email
+                email = "nchimicles@gmail.com"
+
+                # Check if the request was successful
+                if response.status_code == 200:
+                    data = response.json()  # Parse the JSON response
+                    email = data.get('email', 'No email found')
+                    print(f"Email for user ID {user_id}: {email}")
+                else:
+                    email = "nchimicles@gmail.com"
+                    print(f"Failed to fetch email for user ID {user_id}. Status code: {response.status_code}")
+                    print(response.json())  # Print the error message from the API response (if any)
+
+                # Prepare the event payload with the dynamic email address
+                event = {
+                    "email": email  # Destination email address
+                }
+
+                # Convert the event payload to a JSON string
+                json_payload = json.dumps(event)
+
+                # Invoke the Lambda function
+                response = lambda_client.invoke(
+                    FunctionName='sendEmailtoUser',  # The Lambda function name
+                    InvocationType='RequestResponse',  # Synchronous invocation (wait for result)
+                    Payload=json_payload  # Pass the event data as Payload
+                )
+
+                # Parse and print the response from Lambda
+                response_payload = json.loads(response['Payload'].read().decode('utf-8'))
+                print("Response from Lambda:", response_payload)
 
         except Exception as e:
             logging.exception("Upload processing failed")
@@ -403,6 +460,54 @@ def get_content_ids():
     except Exception as e:
         logging.error(f"Error getting content IDs: {e}")
         return jsonify({'error': 'Failed to get content IDs'}), 500
+
+# get all chunks for a content_id
+@app.route('/api/content/<int:content_id>/chunks', methods=['GET'])
+def get_content_chunks(content_id):
+    try:
+        # Query all chunks for the given content_id
+        chunks = ContentChunk.query.filter_by(content_id=content_id).all()
+        
+        if not chunks:
+            logging.warning(f"No chunks found for content_id: {content_id}")
+            return jsonify({"error": "No chunks found"}), 404
+
+        # Format response
+        chunks_data = [{
+            'id': chunk.id,
+            'chunk_order': chunk.chunk_order,
+            'embedding_id': chunk.embedding_id
+        } for chunk in chunks]
+
+        response_data = {
+            "content_id": content_id,
+            "chunks": chunks_data
+        }
+        
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        logging.error(f"Error fetching chunks for content_id {content_id}: {str(e)}")
+        return jsonify({"error": "Failed to fetch chunks"}), 500
+
+# add middleware
+@app.before_request
+def log_request_info():
+    logging.info(f"Headers: {request.headers}")
+    logging.info(f"Body: {request.get_data()}")
+
+    # for now just check that it has a Authorization header
+    if 'X-API-KEY' not in request.headers:
+        logging.warning("No X-API-KEY header")
+        return jsonify({'error': 'No X-API-KEY'}), 401
+    
+    x_api_key = request.headers.get('X-API-KEY')
+    if x_api_key != API_KEY:
+        logging.warning("Invalid X-API-KEY")
+        return jsonify({'error': 'Invalid X-API-KEY'}), 401
+    else:
+        return
+    
 
 if __name__ == '__main__':
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
